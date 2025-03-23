@@ -3,7 +3,7 @@ import numpy as np
 from scipy import signal
 import argparse
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='../templates', static_folder='../static')
 
 @app.route('/')
 def index():
