@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据可视化与分析工具</title>
+    <!-- 确保Plotly正确加载 -->
+    <script src="https://cdn.plot.ly/plotly-2.18.0.min.js"></script>
+    <!-- 添加FontAwesome图标 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <style>
+        /* 变量定义 */
+        :root {
+            --primary-color: #3498db;
+            --secondary-color: #2c3e50;
+            --accent-color: #e74c3c;
+            --light-bg: #f5f5f5;
+            --dark-text: #333;
+            --light-text: #fff;
+            --tab-active: #3498db;
+            --tab-inactive: #95a5a6;
+            --border-color: #ddd;
+            --hover-bg: #f0f0f0;
+        }
+        
+        /* 基础样式 */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        body {
+            background-color: var(--light-bg);
+            color: var(--dark-text);
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        header {
+            background-color: var(--secondary-color);
+            color: var(--light-text);
+            padding: 1rem;
+            text-align: center;
+        }
+        
+        /* 布局容器 */
+        .container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        
+        .controls {
+            width: 30%;
+            background-color: #fff;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .plot-area {
+            width: 70%;
+            padding: 1rem;
+            background-color: #fff;
+            box-shadow: -2px 0 5px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        #plot-area-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            background-color: #fafafa;
+            display: block !important; /* 覆盖网格或弹性布局 */
+        }
+        
+        /* 标签页样式 */
+        .tabs {
+            display: flex;
+            background-color: var(--secondary-color);
+        }
+        
+        .tab-button {
+            padding: 12px 20px;
+            background-color: var(--tab-inactive);
+            color: white;
+            border: none;
+            cursor: pointer;
+            flex: 1;
+            text-align: center;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+        
+        .tab-button:hover {
+            background-color: var(--tab-active);
+        }
+        
+        .tab-button.active {
+            background-color: var(--tab-active);
+        }
+        
+        .tab-button i {
+            margin-right: 8px;
+        }
+        
+        .tab-content {
+            display: none;
+            padding: 1rem;
+            overflow-y: auto;
+            flex: 1;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        /* 控制面板样式 */
+        .control-panel {
+            margin-bottom: 1.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .control-panel h3 {
+            color: var(--secondary-color);
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+        }
+        
+        .control-panel h3 i {
+            margin-right: 0.5rem;
+            color: var(--primary-color);
+        }
+        
+        /* 标题样式 */
+        h4 {
+            color: var(--secondary-color);
+            margin: 10px 0 5px 0;
+            font-size: 0.95em;
+        }
+        
+        /* 拖放区域样式 */
+        #drop-area {
+            border: 2px dashed #ccc;
+            padding: 1.5rem;
+            text-align: center;
+            background-color: var(--light-bg);
+            border-radius: 8px;
+            transition: all 0.3s;
+        }
+        
+        #drop-area:hover {
+            border-color: var(--primary-color);
+            background-color: #e8f4fd;
+        }
+        
+        /* 文件输入样式 */
+        #file-input {
+            display: none;
+        }
+        
+        .file-btn {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            display: inline-block;
+            margin-top: 10px;
+            transition: background-color 0.3s;
+        }
+        
+        .file-btn:hover {
+            background-color: #2980b9;
+        }
+        
+        /* 表单元素样式 */
+        .input-group {
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+        }
+        
+        .input-group label {
+            flex: 1;
+            font-weight: 500;
+        }
+        
+        .input-group input, .input-group select {
+            flex: 2;
+            padding: 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+        }
+        
+        /* 列表样式 */
+        #column-list-container {
+            max-height: 350px;
+            overflow-y: auto;
+            border: 1px solid #eee;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        
+        #column-list {
+            list-style: none;
+        }
+        
+        #column-list li {
+            padding: 4px 8px;
+            display: flex;
+            align-items: center;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        
+        #column-list li:last-child {
+            border-bottom: none;
+        }
+        
+        #column-list li:hover {
+            background-color: #f5f5f5;
+        }
+        
+        #column-list li.selected {
+            background-color: #e3f2fd;
+            border-left: 3px solid var(--primary-color);
+        }
+        
+        #column-list li.x-axis {
+            background-color: #fef9e7;
+            border-left: 3px solid #f39c12;
+        }
+        
+        /* 搜索框样式 */
+        #search-box {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        
+        /* 按钮样式 */
+        button {
+            padding: 8px 15px;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        
+        button:hover {
+            background-color: #2980b9;
+        }
+        
+        button.primary {
+            background-color: var(--primary-color);
+            font-weight: 500;
+            padding: 10px 15px;
+        }
+        
+        button.secondary {
+            background-color: #95a5a6;
+        }
+        
+        button.secondary:hover {
+            background-color: #7f8c8d;
+        }
+        
+        button.danger {
+            background-color: var(--accent-color);
+        }
+        
+        button.danger:hover {
+            background-color: #c0392b;
+        }
+        
+        #plot-data {
+            width: 100%;
+            margin-bottom: 10px;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        
+        /* 单选框组样式 */
+        .radio-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        
+        .radio-group label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+        }
+        
+        /* 列表标题区域 */
+        .list-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+        
+        .list-header h4 {
+            margin: 0;
+        }
+        
+        /* 绘图工具栏 */
+        .plot-toolbar {
+            display: flex;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-bottom: 1px solid #eee;
+            border-radius: 4px 4px 0 0;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+        
+        .plot-toolbar .radio-group {
+            margin: 0 15px 0 0;
+        }
+        
+        .plot-toolbar label {
+            margin-right: 10px;
+            white-space: nowrap;
+        }
+        
+        /* 绘图容器样式 - 合并重复定义并改为overflow: visible */
+        .plot-container {
+            background-color: #fff;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            transition: all 0.3s ease;
+            position: relative;
+            margin-bottom: 20px;
+            border-radius: 6px;
+            overflow: visible; /* 关键修改: hidden -> visible */
+            border: 1px solid #e0e0e0;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* 图表标题栏 */
+        .plot-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background-color: #f8f9fa;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .plot-title {
+            font-weight: 500;
+            color: var(--secondary-color);
+            font-size: 0.9rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 80%;
+        }
+        
+        .plot-controls {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .plot-control-btn {
+            background: none;
+            border: none;
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            padding: 0;
+        }
+        
+        .plot-control-btn:hover {
+            background-color: #eaeaea;
+        }
+        
+        .plot-control-btn.close:hover {
+            background-color: #ffdddd;
+            color: #c0392b;
+        }
+        
+        .plot-control-btn.minimize:hover {
+            background-color: #e8f4fd;
+            color: #3498db;
+        }
+        
+        /* 最小化图表的样式 */
+        .plot-container.minimized .plot-body {
+            display: none;
+        }
+        
+        .plot-container.minimized {
+            margin-bottom: 10px;
+        }
+        
+        .plot-body {
+            width: 100%;
+            height: 400px !important;
+            min-height: 400px !重要;
+            position: relative;
+            flex: 1;
+        }
+        
+        /* 滚动条美化 */
+        #plot-area-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        #plot-area-container::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        
+        #plot-area-container::-webkit-scrollbar-thumb {
+            background: #bbb;
+            border-radius: 10px;
+        }
+        
+        #plot-area-container::-webkit-scrollbar-thumb:hover {
+            background: #999;
+        }
+        
+        /* 工具提示 */
+        .tooltip {
+            position: relative;
+        }
+        
+        .tooltip .tooltip-text {
+            visibility: hidden;
+            width: 200px;
+            background-color: var(--secondary-color);
+            color: #fff;
+            text-align: center;
+            border-radius: 6px;
+            padding: 5px;
+            position: absolute;
+            z-index: 1;
+            bottom: 125%;
+            left: 50%;
+            margin-left: -100px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        
+        .tooltip:hover .tooltip-text {
+            visibility: visible;
+            opacity: 1;
+        }
+        
+        /* 加载状态和通知 */
+        .loading {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 1000;
+            padding: 20px;
+            background: rgba(255,255,255,0.9);
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        #notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background-color: var(--secondary-color);
+            color: white;
+            border-radius: 4px;
+            box-shadow: 0 3px 6px rgba(0,0,0,0.16);
+            display: none;
+            z-index: 1001;
+        }
+        
+        /* 其他杂项 */
+        .data-select-footer {
+            margin-top: 15px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1><i class="fas fa-chart-line"></i> 数据可视化与分析工具</h1>
+    </header>
+    
+    <div class="container">
+        <div class="controls">
+            <!-- 标签页导航 -->
+            <div class="tabs">
+                <button class="tab-button active" data-tab="import">
+                    <i class="fas fa-file-upload"></i>数据导入
+                </button>
+                <button class="tab-button" data-tab="select">
+                    <i class="fas fa-list"></i>数据选择
+                </button>
+                <button class="tab-button" data-tab="analyze">
+                    <i class="fas fa-wave-square"></i>数据分析
+                </button>
+            </div>
+            
+            <!-- 标签页内容区域 -->
+            <!-- 数据导入标签页 -->
+            <div id="tab-import" class="tab-content active">
+                <div class="control-panel">
+                    <h3><i class="fas fa-file-upload"></i> 数据导入</h3>
+                    <div id="drop-area">
+                        <p>拖动文件到此区域或点击选择文件</p>
+                        <label for="file-input" class="file-btn">选择文件</label>
+                        <input type="file" id="file-input" accept=".csv,.txt">
+                    </div>
+                    
+                    <div class="input-group">
+                        <label for="delimiter">分隔符:</label>
+                        <input type="text" id="delimiter" value=",">
+                    </div>
+                    
+                    <div class="input-group">
+                        <label for="sample-rate">采样频率(Hz):</label>
+                        <input type="number" id="sample-rate" value="1000">
+                    </div>
+                </div>
+                
+                <div class="control-panel">
+                    <h3><i class="fas fa-info-circle"></i> 数据信息</h3>
+                    <div id="data-info">
+                        <p>未加载数据</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 数据选择标签页 -->
+            <div id="tab-select" class="tab-content">
+                <div class="control-panel">
+                    <h3><i class="fas fa-list"></i> 数据选择</h3>
+                    
+                    <!-- X轴数据选择移至最上方 -->
+                    <div class="input-group">
+                        <label for="x-axis-select">X轴数据:</label>
+                        <select id="x-axis-select">
+                            <option value="-1">默认序列号</option>
+                            <!-- 列名选项将由JS动态添加 -->
+                        </select>
+                    </div>
+                    
+                    <!-- 搜索框 -->
+                    <div class="input-group">
+                        <label for="search-box">搜索:</label>
+                        <input type="text" id="search-box" placeholder="搜索列名...">
+                    </div>
+                    
+                    <!-- 修改归一化选项部分，将方法选择器放在同一行 -->
+                    <div class="input-group">
+                        <label style="flex: 1;">
+                            <input type="checkbox" id="normalize-data">
+                            数据归一化处理
+                        </label>
+                        <select id="normalization-method" style="flex: 2; display: none;">
+                            <option value="minmax">Min-Max (0-1范围)</option>
+                            <option value="zscore">Z-Score (均值=0,方差=1)</option>
+                            <option value="maxabs">最大绝对值</option>
+                            <option value="robust">健壮缩放 (基于中位数)</option>
+                            <option value="log">对数变换</option>
+                            <option value="sqrt">平方根变换</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Y轴数据列选择 -->
+                    <div class="list-header">
+                        <h4>Y轴数据列:</h4>
+                        <button id="clear-selection" class="secondary" style="padding: 3px 8px; font-size: 0.8em;">
+                            <i class="fas fa-broom"></i> 清除选择
+                        </button>
+                    </div>
+                    <div id="column-list-container">
+                        <ul id="column-list">
+                            <!-- 数据列将由JS动态添加 -->
+                        </ul>
+                    </div>
+                </div>
+                
+                <!-- 绘制数据按钮 -->
+                <div class="data-select-footer">
+                    <button id="plot-data" class="primary">
+                        <i class="fas fa-chart-line"></i> 绘制数据
+                    </button>
+                </div>
+            </div>
+            
+            <!-- 数据分析标签页 -->
+            <div id="tab-analyze" class="tab-content">
+                <div class="control-panel">
+                    <h3><i class="fas fa-signal"></i> 频谱分析</h3>
+                    <div class="button-group">
+                        <button id="perform-fft" class="tooltip">
+                            <i class="fas fa-signal"></i> 频谱分析
+                            <span class="tooltip-text">对选中数据进行FFT分析</span>
+                        </button>
+                    </div>
+                    <!-- 添加多选提示 -->
+                    <div style="font-size: 0.85em; color: #666; margin-top: 5px;">
+                        <i class="fas fa-info-circle"></i> 提示：您可以选择多个数据列进行同时频谱分析
+                    </div>
+                </div>
+                
+                <div class="control-panel">
+                    <h3><i class="fas fa-filter"></i> 滤波设置</h3>
+                    <div class="input-group">
+                        <label for="filter-type">滤波器类型:</label>
+                        <select id="filter-type">
+                            <option value="none">无滤波</option>
+                            <option value="lowpass">低通滤波</option>
+                            <option value="highpass">高通滤波</option>
+                            <option value="bandpass">带通滤波</option>
+                            <option value="bandstop">带阻滤波</option>
+                        </select>
+                    </div>
+                    
+                    <div class="input-group">
+                        <label for="cutoff-freq">截止频率(Hz):</label>
+                        <input type="number" id="cutoff-freq" value="100">
+                    </div>
+                    
+                    <div class="input-group" id="cutoff-freq2-container" style="display:none;">
+                        <label for="cutoff-freq2">截止频率2(Hz):</label>
+                        <input type="number" id="cutoff-freq2" value="200">
+                    </div>
+                    
+                    <div class="input-group">
+                        <label for="filter-order">滤波器阶数:</label>
+                        <input type="number" id="filter-order" value="4">
+                    </div>
+                    
+                    <div class="input-group">
+                        <label>
+                            <input type="checkbox" id="zero-phase" checked>
+                            无相位延迟
+                        </label>
+                    </div>
+                    
+                    <div class="button-group">
+                        <button id="apply-filter" class="tooltip">
+                            <i class="fas fa-filter"></i> 应用滤波
+                            <span class="tooltip-text">对选中数据应用滤波器</span>
+                        </button>
+                    </div>
+                    <!-- 添加多选提示 -->
+                    <div style="font-size: 0.85em; color: #666; margin-top: 5px;">
+                        <i class="fas fa-info-circle"></i> 提示：您可以选择多个数据列进行同时滤波处理
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 简化绘图区域 -->
+        <div class="plot-area">
+            <!-- 绘图工具栏 -->
+            <div class="plot-toolbar">
+                <div class="radio-group">
+                    <label><input type="radio" name="plot-mode" value="new"> 新建图片</label>
+                    <label><input type="radio" name="plot-mode" value="overwrite" checked> 覆盖绘图</label>
+                    <label><input type="radio" name="plot-mode" value="append"> 附加绘图</label>
+                </div>
+                
+                <button id="clear-canvas" class="danger" style="margin-left: auto;">
+                    <i class="fas fa-trash-alt"></i> 清除画面
+                </button>
+            </div>
+            
+            <!-- 绘图容器 -->
+            <div id="plot-area-container">
+                <!-- 绘图区域占位内容 -->
+                <div id="plot-placeholder" style="padding: 20px; text-align: center; color: #666;">
+                    选择数据后点击"绘制数据"按钮来生成图表
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="loading" class="loading">
+        <i class="fas fa-spinner fa-spin fa-2x"></i>
+        <p>处理中...</p>
+    </div>
+    
+    <div id="notification"></div>
+    
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

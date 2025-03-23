@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lwdva"
+version = "0.1.0"
+description = "数据可视化与分析工具"
+authors = [
+    {name = "hexb66"}
+]
+readme = "README.md"
+requires-python = ">=3.6"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "flask>=2.0.0",
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+]
+
+[project.scripts]
+lwdva = "lwdva:main"
