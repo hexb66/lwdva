@@ -894,8 +894,56 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
                         });
                         
-                        // 添加滤波后的数据 - 相同色系的虚线
-                        const filteredColor = baseColor.replace('rgb', 'rgba').replace(')', ', 0.8)');
+                        // 将颜色转换为HSL格式并修改色调以产生明显的差异
+                        // 提取RGB值以便转换为HSL
+                        let rgbMatch = baseColor.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+                        let r, g, b;
+                        
+                        if (rgbMatch) {
+                            r = parseInt(rgbMatch[1]);
+                            g = parseInt(rgbMatch[2]);
+                            b = parseInt(rgbMatch[3]);
+                        } else {
+                            // 默认颜色如果无法解析
+                            r = 0; g = 100; b = 200;
+                        }
+                        
+                        // 将RGB转换为HSL
+                        r /= 255, g /= 255, b /= 255;
+                        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+                        let h, s, l = (max + min) / 2;
+                        
+                        if (max === min) {
+                            h = s = 0; // 灰色
+                        } else {
+                            const d = max - min;
+                            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+                            switch (max) {
+                                case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                                case g: h = (b - r) / d + 2; break;
+                                case b: h = (r - g) / d + 4; break;
+                            }
+                            h /= 6;
+                        }
+                        
+                        // 修改色调以创建对比色 - 在色环上移动120度
+                        h = (h + 0.33) % 1;
+                        
+                        // 转换回RGB
+                        let r2, g2, b2;
+                        if (s === 0) {
+                            r2 = g2 = b2 = l; // 灰色
+                        } else {
+                            const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+                            const p = 2 * l - q;
+                            r2 = hueToRgb(p, q, h + 1/3);
+                            g2 = hueToRgb(p, q, h);
+                            b2 = hueToRgb(p, q, h - 1/3);
+                        }
+                        
+                        const filteredColor = `rgb(${Math.round(r2 * 255)}, ${Math.round(g2 * 255)}, ${Math.round(b2 * 255)})`;
+                        
+                        // 添加滤波后的数据 - 不同色调和虚线
                         traces.push({
                             x: xValues,
                             y: series.filtered_data,
@@ -1007,6 +1055,16 @@ document.addEventListener('DOMContentLoaded', () => {
         .finally(() => {
             hideLoading();
         });
+    }
+    
+    // 添加辅助函数用于HSL到RGB转换
+    function hueToRgb(p, q, t) {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1/6) return p + (q - p) * 6 * t;
+        if (t < 1/2) return q;
+        if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+        return p;
     }
     
     // 事件绑定 - 特别关注文件读取功能
