@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lwdva"
-version = "0.1.1"
+version = "0.1.2"
 description = "数据可视化与分析工具"
 authors = [
     {name = "hexb66"}
