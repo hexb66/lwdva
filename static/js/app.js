@@ -38,6 +38,8 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 应用数据
     let plotColors = {}; // 存储每列对应的颜色
+
+    let currentMetadata = null;
     
     // 添加文件信息变量
     let currentFileName = '';
@@ -131,6 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
             malformedLines: [],
             nonNumericCount: 0
         };
+        let lastValues = null;
 
         for (let i = 0; i < lines.length; i++) {
             if (lines[i].trim() !== '') {
@@ -146,6 +149,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const rawHeaders = parseDelimitedLine(lines[headerLineIndex], delimiter);
         const headers = rawHeaders.map(h => h.trim());
         const rows = [];
+        lastValues = new Array(headers.length).fill(0);
 
         for (let i = headerLineIndex + 1; i < lines.length; i++) {
             const line = lines[i];
@@ -164,14 +168,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 fields.length = headers.length;
             }
 
-            const numericRow = fields.map(value => {
+            const numericRow = fields.map((value, index) => {
                 const trimmed = value.trim();
-                if (trimmed === '') return 0;
+                if (trimmed === '') {
+                    return lastValues[index];
+                }
                 const num = parseFloat(trimmed);
                 if (!Number.isFinite(num)) {
                     warnings.nonNumericCount += 1;
-                    return 0;
+                    return lastValues[index];
                 }
+                lastValues[index] = num;
                 return num;
             });
 
@@ -232,6 +239,16 @@ document.addEventListener('DOMContentLoaded', () => {
             <p><i class="fas fa-wave-square"></i> 采样频率: ${sampleRateInput.value} Hz</p>
             <p><i class="fas fa-code"></i> 分隔符: "${delimiterInput.value}"</p>
         `;
+
+        if (currentMetadata && Object.keys(currentMetadata).length > 0) {
+            const metaLines = Object.entries(currentMetadata)
+                .map(([key, value]) => `<p><i class="fas fa-tag"></i> ${key}: ${value}</p>`)
+                .join('');
+            infoHTML += `
+                <p><strong>NPZ属性:</strong></p>
+                ${metaLines}
+            `;
+        }
         
         dataInfo.innerHTML = infoHTML;
         
@@ -262,6 +279,54 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
+    function setLoadedData(newHeaders, newRows, warningMessage, metadata = null) {
+        headers = newHeaders;
+        csvData = newRows;
+        currentMetadata = metadata;
+        selectedColumns.clear();
+        xAxisColumn = -1;
+        initializeColors();
+        updateXAxisSelect();
+        renderColumnList();
+        updateDataInfo();
+        showNotification(`成功导入数据: ${headers.length} 列, ${csvData.length} 行`);
+        if (warningMessage) {
+            showNotification(`导入警告: ${warningMessage}`, 6000);
+        }
+    }
+
+    function handleNpzFile(file) {
+        showLoading();
+        const formData = new FormData();
+        formData.append('file', file);
+        fetch('/api/npz', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(err => {
+                    throw new Error(err.error || '服务器响应错误');
+                });
+            }
+            return response.json();
+        })
+        .then(result => {
+            const warningParts = [];
+            if (result.warnings && result.warnings.lengths) {
+                warningParts.push('数组长度不一致，已按最大长度补齐');
+            }
+            setLoadedData(result.headers, result.rows, warningParts.join('；'), result.metadata || null);
+        })
+        .catch(error => {
+            showNotification(`错误: ${error.message}`, 5000);
+            console.error(error);
+        })
+        .finally(() => {
+            hideLoading();
+        });
+    }
+
     // 数据处理函数
     function handleFiles(file) {
         console.log("处理文件:", file.name); // 调试信息
@@ -282,34 +347,25 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         const reader = new FileReader();
+        if (file.name && file.name.toLowerCase().endsWith('.npz')) {
+            hideLoading();
+            handleNpzFile(file);
+            return;
+        }
+
         reader.onload = e => {
             try {
                 const content = e.target.result;
                 const delimiter = delimiterInput.value ? delimiterInput.value.replace(/\\t/g, '\t') : ',';
                 const parsed = parseDelimitedContent(content, delimiter);
-                headers = parsed.headers;
-                csvData = parsed.rows;
                 
                 // 打印数据样本以便调试
                 console.log("数据样本:", {
-                    headers: headers,
-                    firstRow: csvData[0],
-                    rowCount: csvData.length
+                    headers: parsed.headers,
+                    firstRow: parsed.rows[0],
+                    rowCount: parsed.rows.length
                 });
                 
-                // 重置状态
-                selectedColumns.clear();
-                xAxisColumn = -1; // 重置为默认序列号
-                
-                // 使用固定学术配色，替代随机颜色
-                initializeColors();
-                
-                // 更新UI
-                updateXAxisSelect(); // 添加X轴下拉菜单更新
-                renderColumnList();
-                updateDataInfo(); // 现在会显示文件路径
-                showNotification(`成功导入数据: ${headers.length} 列, ${csvData.length} 行`);
-
                 const warningParts = [];
                 if (parsed.warnings.paddedLines.length > 0) {
                     warningParts.push(`部分行列数不足，已补齐(示例行: ${parsed.warnings.paddedLines.slice(0, 3).join(', ')})`);
@@ -320,9 +376,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (parsed.warnings.nonNumericCount > 0) {
                     warningParts.push(`发现 ${parsed.warnings.nonNumericCount} 个非数值字段，已按0处理`);
                 }
-                if (warningParts.length > 0) {
-                    showNotification(`导入警告: ${warningParts.join('；')}`, 6000);
-                }
+                setLoadedData(parsed.headers, parsed.rows, warningParts.join('；'), null);
                 
                 // 不自动切换标签页，让用户看到导入信息
                 // switchTab('select');

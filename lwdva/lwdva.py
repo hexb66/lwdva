@@ -25,6 +25,79 @@ def _normalize_signals(data_field):
     # 单组数据
     return [data_field], None
 
+def _coerce_numeric_array(array, name):
+    if np.iscomplexobj(array):
+        if np.allclose(array.imag, 0):
+            array = array.real
+        else:
+            return None, f'数组 {name} 为复数类型，无法绘制'
+    if not np.issubdtype(array.dtype, np.number):
+        try:
+            array = array.astype(float)
+        except (TypeError, ValueError):
+            return None, f'数组 {name} 不是数值类型'
+    return array.astype(float), None
+
+def _npz_to_table(npz_file):
+    headers = []
+    columns = []
+    metadata = {}
+    for key in npz_file.files:
+        array = np.array(npz_file[key])
+        if array.ndim == 0:
+            coerced, error = _coerce_numeric_array(array, key)
+            if error:
+                return None, error
+            metadata[key] = float(coerced.reshape(1)[0])
+            continue
+        if array.ndim == 1:
+            coerced, error = _coerce_numeric_array(array, key)
+            if error:
+                return None, error
+            headers.append(key)
+            columns.append(coerced)
+        elif array.ndim >= 2:
+            coerced, error = _coerce_numeric_array(array, key)
+            if error:
+                return None, error
+            leading = coerced.shape[0]
+            trailing_shape = coerced.shape[1:]
+            flattened = coerced.reshape(leading, -1)
+            for flat_index, index_tuple in enumerate(np.ndindex(*trailing_shape)):
+                label = ','.join(str(i) for i in index_tuple)
+                headers.append(f"{key}[{label}]")
+                columns.append(flattened[:, flat_index])
+
+    if not headers:
+        return None, 'npz中未找到可用数组'
+
+    lengths = [len(col) for col in columns]
+    max_len = max(lengths)
+    rows = [[None for _ in range(len(headers))] for _ in range(max_len)]
+    for col_idx, col in enumerate(columns):
+        last_value = None
+        for row_idx, value in enumerate(col):
+            if np.isfinite(value):
+                last_value = float(value)
+                rows[row_idx][col_idx] = last_value
+            else:
+                rows[row_idx][col_idx] = last_value
+        if len(col) < max_len and last_value is not None:
+            for row_idx in range(len(col), max_len):
+                rows[row_idx][col_idx] = last_value
+
+    warnings = {}
+    if len(set(lengths)) > 1:
+        warnings['lengths'] = {headers[i]: lengths[i] for i in range(len(headers))}
+        warnings['max_length'] = max_len
+
+    return {
+        'headers': headers,
+        'rows': rows,
+        'metadata': metadata,
+        'warnings': warnings
+    }, None
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -248,6 +321,22 @@ def apply_filter():
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/npz', methods=['POST'])
+def load_npz():
+    if 'file' not in request.files:
+        return jsonify({'error': '缺少npz文件'}), 400
+    file = request.files['file']
+    if not file or file.filename == '':
+        return jsonify({'error': '文件名为空'}), 400
+    try:
+        with np.load(file, allow_pickle=False) as npz_file:
+            result, error = _npz_to_table(npz_file)
+            if error:
+                return jsonify({'error': error}), 400
+            return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': f'无法解析npz文件: {e}'}), 400
 
 def main():
     # 创建命令行参数解析器
