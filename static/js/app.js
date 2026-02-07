@@ -544,10 +544,48 @@ document.addEventListener('DOMContentLoaded', () => {
         plotBody.style.height = '400px';
         plotBody.style.width = '100%';
         plotBody.style.position = 'relative'; // 确保Plotly可以正确定位
+
+        // 添加拖动调整高度的手柄
+        const resizer = document.createElement('div');
+        resizer.className = 'plot-resizer';
+        resizer.title = '拖动调整高度';
+
+        let isResizing = false;
+        let startY = 0;
+        let startHeight = 0;
+
+        const onMouseMove = (event) => {
+            if (!isResizing) return;
+            const deltaY = event.clientY - startY;
+            const newHeight = Math.max(200, startHeight + deltaY);
+            plotBody.style.height = `${newHeight}px`;
+            if (plotBody._fullLayout) {
+                Plotly.relayout(plotBody, { height: newHeight });
+            }
+        };
+
+        const onMouseUp = () => {
+            if (!isResizing) return;
+            isResizing = false;
+            document.body.style.cursor = '';
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        };
+
+        resizer.addEventListener('mousedown', (event) => {
+            event.preventDefault();
+            isResizing = true;
+            startY = event.clientY;
+            startHeight = parseInt(window.getComputedStyle(plotBody).height, 10) || 400;
+            document.body.style.cursor = 'ns-resize';
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+        });
         
         // 组装容器
         plotContainer.appendChild(header);
         plotContainer.appendChild(plotBody);
+        plotContainer.appendChild(resizer);
         
         return { 
             container: plotContainer, 
