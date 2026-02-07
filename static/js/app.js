@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const searchBox = document.getElementById('search-box');
     const xAxisSelect = document.getElementById('x-axis-select');
     const normalizeDataCheckbox = document.getElementById('normalize-data');
+    const diffDataCheckbox = document.getElementById('diff-data');
     const plotDataBtn = document.getElementById('plot-data');
     const clearSelectionBtn = document.getElementById('clear-selection');
     const clearCanvasBtn = document.getElementById('clear-canvas');
@@ -570,9 +571,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // 准备数据
         const shouldNormalize = normalizeDataCheckbox.checked;
-        const xValues = getXAxisValues();
-        const traces = getTraces(xValues, shouldNormalize);
-        const plotTitle = getPlotTitle(shouldNormalize);
+        const shouldDiff = diffDataCheckbox.checked;
+        const sampleRate = parseFloat(sampleRateInput.value);
+        let xValues = getXAxisValues();
+        if (shouldDiff && xValues.length > 1) {
+            xValues = xValues.slice(1);
+        }
+        const traces = getTraces(xValues, shouldNormalize, shouldDiff, sampleRate);
+        const plotTitle = getPlotTitle(shouldNormalize, shouldDiff);
 
         // 获取绘图模式：new、overwrite 或 append
         const mode = getPlotMode();
@@ -629,7 +635,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 mirror: true        // 使顶部也显示轴线
             },
             yaxis: { 
-                title: getYAxisTitle(shouldNormalize),
+                title: getYAxisTitle(shouldNormalize, shouldDiff),
                 gridcolor: '#E0E0E0',
                 zerolinecolor: '#000000',
                 tickfont: { size: 11 },
@@ -755,12 +761,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // 获取Y轴数据
-    function getTraces(xValues, shouldNormalize) {
+    function getTraces(xValues, shouldNormalize, shouldDiff, sampleRate) {
         const traces = [];
         const normalizationMethod = normalizationMethodSelect.value;
         
         selectedColumns.forEach(colIndex => {
             let yValues = csvData.map(row => parseFloat(row[colIndex]) || 0);
+
+            if (shouldDiff) {
+                yValues = calculateDifference(yValues, sampleRate);
+            }
             
             if (shouldNormalize) {
                 yValues = normalizeData(yValues, normalizationMethod);
@@ -770,7 +780,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 x: xValues,
                 y: yValues,
                 mode: 'lines',
-                name: headers[colIndex] + (shouldNormalize ? ` (${getNormalizationLabel(normalizationMethod)})` : ''),
+                name: headers[colIndex]
+                    + (shouldDiff ? ' (差分)' : '')
+                    + (shouldNormalize ? ` (${getNormalizationLabel(normalizationMethod)})` : ''),
                 line: { color: plotColors[colIndex] }
             });
         });
@@ -779,14 +791,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // 获取图表标题
-    function getPlotTitle(shouldNormalize) {
+    function getPlotTitle(shouldNormalize, shouldDiff) {
         if (selectedColumns.size === 1) {
             const colIndex = selectedColumns.values().next().value;
-            return headers[colIndex] + (shouldNormalize ? ` (${getNormalizationLabel(normalizationMethodSelect.value)})` : '');
+            return headers[colIndex]
+                + (shouldDiff ? ' (差分)' : '')
+                + (shouldNormalize ? ` (${getNormalizationLabel(normalizationMethodSelect.value)})` : '');
         } else if (xAxisColumn >= 0) {
-            return `多系列数据 - X轴: ${headers[xAxisColumn]}`;
+            return `多系列数据 - X轴: ${headers[xAxisColumn]}` + (shouldDiff ? ' (差分)' : '');
         } else {
-            return '数据曲线';
+            return shouldDiff ? '数据曲线 (差分)' : '数据曲线';
         }
     }
     
@@ -1479,18 +1493,30 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 修改布局显示信息
-    function getYAxisTitle(shouldNormalize) {
-        if (!shouldNormalize) return '数值';
+    function getYAxisTitle(shouldNormalize, shouldDiff) {
+        if (!shouldNormalize) return shouldDiff ? '差分值 (单位/秒)' : '数值';
         
         const method = normalizationMethodSelect.value;
         switch (method) {
-            case 'minmax': return '归一化数值 (0-1)';
-            case 'zscore': return '标准化数值 (Z-Score)';
-            case 'maxabs': return '缩放数值 (最大绝对值)';
-            case 'robust': return '健壮缩放数值';
-            case 'log': return '对数变换值';
-            case 'sqrt': return '平方根变换值';
-            default: return '归一化数值';
+            case 'minmax': return shouldDiff ? '归一化差分值 (0-1)' : '归一化数值 (0-1)';
+            case 'zscore': return shouldDiff ? '标准化差分值 (Z-Score)' : '标准化数值 (Z-Score)';
+            case 'maxabs': return shouldDiff ? '缩放差分值 (最大绝对值)' : '缩放数值 (最大绝对值)';
+            case 'robust': return shouldDiff ? '健壮缩放差分值' : '健壮缩放数值';
+            case 'log': return shouldDiff ? '对数变换差分值' : '对数变换值';
+            case 'sqrt': return shouldDiff ? '平方根变换差分值' : '平方根变换值';
+            default: return shouldDiff ? '归一化差分值' : '归一化数值';
         }
+    }
+
+    function calculateDifference(values, sampleRate) {
+        if (!values || values.length < 2) {
+            return [];
+        }
+        const dt = Number.isFinite(sampleRate) && sampleRate > 0 ? 1 / sampleRate : 1;
+        const result = [];
+        for (let i = 1; i < values.length; i++) {
+            result.push((values[i] - values[i - 1]) / dt);
+        }
+        return result;
     }
 });
