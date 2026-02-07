@@ -93,6 +93,93 @@ document.addEventListener('DOMContentLoaded', () => {
             notification.style.display = 'none';
         }, duration);
     }
+
+    function parseDelimitedLine(line, delimiter) {
+        if (!delimiter || delimiter.length !== 1) {
+            return line.split(delimiter || ',');
+        }
+        const fields = [];
+        let current = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+            if (char === '"') {
+                const nextChar = line[i + 1];
+                if (inQuotes && nextChar === '"') {
+                    current += '"';
+                    i++;
+                } else {
+                    inQuotes = !inQuotes;
+                }
+            } else if (char === delimiter && !inQuotes) {
+                fields.push(current);
+                current = '';
+            } else {
+                current += char;
+            }
+        }
+        fields.push(current);
+        return fields;
+    }
+
+    function parseDelimitedContent(content, delimiter) {
+        const lines = content.split(/\r?\n/);
+        let headerLineIndex = -1;
+        const warnings = {
+            paddedLines: [],
+            trimmedLines: [],
+            malformedLines: [],
+            nonNumericCount: 0
+        };
+
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].trim() !== '') {
+                headerLineIndex = i;
+                break;
+            }
+        }
+
+        if (headerLineIndex === -1) {
+            throw new Error('文件为空');
+        }
+
+        const rawHeaders = parseDelimitedLine(lines[headerLineIndex], delimiter);
+        const headers = rawHeaders.map(h => h.trim());
+        const rows = [];
+
+        for (let i = headerLineIndex + 1; i < lines.length; i++) {
+            const line = lines[i];
+            if (line.trim() === '') {
+                continue;
+            }
+            const fields = parseDelimitedLine(line, delimiter);
+
+            if (fields.length < headers.length) {
+                warnings.paddedLines.push(i + 1);
+                while (fields.length < headers.length) {
+                    fields.push('');
+                }
+            } else if (fields.length > headers.length) {
+                warnings.trimmedLines.push(i + 1);
+                fields.length = headers.length;
+            }
+
+            const numericRow = fields.map(value => {
+                const trimmed = value.trim();
+                if (trimmed === '') return 0;
+                const num = parseFloat(trimmed);
+                if (!Number.isFinite(num)) {
+                    warnings.nonNumericCount += 1;
+                    return 0;
+                }
+                return num;
+            });
+
+            rows.push(numericRow);
+        }
+
+        return { headers, rows, warnings };
+    }
     
     function getRandomColor() {
         const r = Math.floor(Math.random() * 255);
@@ -162,7 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // 删除之前的成功提示（如果有）
         const existingAlert = importTab.querySelector('.success-alert');
         if (existingAlert) {
-            importTab.removeChild(existingAlert);
+            existingAlert.remove();
         }
         
         // 添加类名以便后续识别
@@ -170,7 +257,9 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // 插入到数据信息区域前面
         const infoPanel = importTab.querySelector('.control-panel:nth-child(2)');
-        infoPanel.insertBefore(successAlert, infoPanel.firstChild);
+        if (infoPanel) {
+            infoPanel.insertBefore(successAlert, infoPanel.firstChild);
+        }
     }
     
     // 数据处理函数
@@ -197,27 +286,9 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const content = e.target.result;
                 const delimiter = delimiterInput.value ? delimiterInput.value.replace(/\\t/g, '\t') : ',';
-                const lines = content.split(/\r?\n/).filter(line => line.trim() !== '');
-                
-                if (lines.length === 0) {
-                    throw new Error('文件为空');
-                }
-                
-                headers = lines[0].split(delimiter).map(h => h.trim());
-                
-                // 处理数据行 - 确保数据类型为数值
-                csvData = [];
-                for (let i = 1; i < lines.length; i++) {
-                    const values = lines[i].split(delimiter).map(x => {
-                        // 强制转换为数值
-                        return parseFloat(x) || 0;
-                    });
-                    
-                    // 确保每行的数据列数一致
-                    if (values.length === headers.length) {
-                        csvData.push(values);
-                    }
-                }
+                const parsed = parseDelimitedContent(content, delimiter);
+                headers = parsed.headers;
+                csvData = parsed.rows;
                 
                 // 打印数据样本以便调试
                 console.log("数据样本:", {
@@ -238,6 +309,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderColumnList();
                 updateDataInfo(); // 现在会显示文件路径
                 showNotification(`成功导入数据: ${headers.length} 列, ${csvData.length} 行`);
+
+                const warningParts = [];
+                if (parsed.warnings.paddedLines.length > 0) {
+                    warningParts.push(`部分行列数不足，已补齐(示例行: ${parsed.warnings.paddedLines.slice(0, 3).join(', ')})`);
+                }
+                if (parsed.warnings.trimmedLines.length > 0) {
+                    warningParts.push(`部分行列数过多，已截断(示例行: ${parsed.warnings.trimmedLines.slice(0, 3).join(', ')})`);
+                }
+                if (parsed.warnings.nonNumericCount > 0) {
+                    warningParts.push(`发现 ${parsed.warnings.nonNumericCount} 个非数值字段，已按0处理`);
+                }
+                if (warningParts.length > 0) {
+                    showNotification(`导入警告: ${warningParts.join('；')}`, 6000);
+                }
                 
                 // 不自动切换标签页，让用户看到导入信息
                 // switchTab('select');
@@ -386,6 +471,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (index > -1) {
                 plotContainers.splice(index, 1);
             }
+
+            ensurePlotPlaceholder();
         };
         
         // 添加按钮到控制区
@@ -434,7 +521,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const plotTitle = getPlotTitle(shouldNormalize);
 
         // 获取绘图模式：new、overwrite 或 append
-        const mode = document.querySelector('input[name="plot-mode"]:checked').value;
+        const mode = getPlotMode();
 
         // 声明目标容器和绘图主体
         let targetContainer, plotBody;
@@ -446,17 +533,33 @@ document.addEventListener('DOMContentLoaded', () => {
             targetContainer = container;
             plotBody = body;
             plotAreaElem.insertBefore(targetContainer, plotAreaElem.firstChild);
+            plotContainers.unshift(targetContainer);
         } else if (mode === 'overwrite') {
             // 创建新容器并替换第一个图表
+            const oldContainer = plotAreaElem.children[0];
+            const oldBody = oldContainer.querySelector('.plot-body');
+            if (oldBody && oldBody._fullLayout) {
+                Plotly.purge(oldBody);
+            }
             const { container, body } = createPlotContainer(plotTitle);
             targetContainer = container;
             plotBody = body;
             plotAreaElem.replaceChild(targetContainer, plotAreaElem.children[0]);
+            plotContainers = plotContainers.filter(item => item !== oldContainer);
+            plotContainers.unshift(targetContainer);
         } else if (mode === 'append') {
             // 使用已有图表容器
-            targetContainer = plotAreaElem.children[0];
-            // 从已有容器中找到绘图主体
-            plotBody = targetContainer.querySelector('.plot-body');
+            if (plotAreaElem.children.length === 0) {
+                const { container, body } = createPlotContainer(plotTitle);
+                targetContainer = container;
+                plotBody = body;
+                plotAreaElem.insertBefore(targetContainer, plotAreaElem.firstChild);
+                plotContainers.unshift(targetContainer);
+            } else {
+                targetContainer = plotAreaElem.children[0];
+                // 从已有容器中找到绘图主体
+                plotBody = targetContainer.querySelector('.plot-body');
+            }
         }
 
         // 定义图表布局 - 使用学术风格并添加边框
@@ -524,7 +627,7 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => {
             // 绘图操作
             try {
-                if (mode === 'append' && targetContainer._fullLayout) {
+                if (mode === 'append' && plotBody && plotBody._fullLayout) {
                     // 附加模式下，添加新数据到已有图表
                     Plotly.addTraces(plotBody, traces);
                 } else {
@@ -538,6 +641,54 @@ document.addEventListener('DOMContentLoaded', () => {
                 displayError(plotAreaElem, err, xValues, traces);
             }
         }, 50);
+    }
+
+    function getPlotMode() {
+        const selected = document.querySelector('input[name="plot-mode"]:checked');
+        return selected ? selected.value : 'overwrite';
+    }
+
+    function preparePlotContainer(plotTitle, mode) {
+        const plotAreaElem = document.getElementById('plot-area-container');
+        const placeholder = document.getElementById('plot-placeholder');
+        if (placeholder) {
+            placeholder.remove();
+        }
+
+        let targetContainer, plotBody;
+
+        if (mode === 'new' || plotAreaElem.children.length === 0) {
+            const { container, body } = createPlotContainer(plotTitle);
+            targetContainer = container;
+            plotBody = body;
+            plotAreaElem.insertBefore(targetContainer, plotAreaElem.firstChild);
+            plotContainers.unshift(targetContainer);
+        } else if (mode === 'overwrite') {
+            const oldContainer = plotAreaElem.children[0];
+            const oldBody = oldContainer.querySelector('.plot-body');
+            if (oldBody && oldBody._fullLayout) {
+                Plotly.purge(oldBody);
+            }
+            const { container, body } = createPlotContainer(plotTitle);
+            targetContainer = container;
+            plotBody = body;
+            plotAreaElem.replaceChild(targetContainer, plotAreaElem.children[0]);
+            plotContainers = plotContainers.filter(item => item !== oldContainer);
+            plotContainers.unshift(targetContainer);
+        } else if (mode === 'append') {
+            if (plotAreaElem.children.length === 0) {
+                const { container, body } = createPlotContainer(plotTitle);
+                targetContainer = container;
+                plotBody = body;
+                plotAreaElem.insertBefore(targetContainer, plotAreaElem.firstChild);
+                plotContainers.unshift(targetContainer);
+            } else {
+                targetContainer = plotAreaElem.children[0];
+                plotBody = targetContainer.querySelector('.plot-body');
+            }
+        }
+
+        return { targetContainer, plotBody, plotAreaElem };
     }
     
     // 获取X轴数据
@@ -612,9 +763,26 @@ document.addEventListener('DOMContentLoaded', () => {
     // 清除所有图表
     function clearAllPlots() {
         const container = document.getElementById('plot-area-container');
+        const plots = container.querySelectorAll('.plot-body');
+        plots.forEach(plotBody => {
+            if (plotBody._fullLayout) {
+                Plotly.purge(plotBody);
+            }
+        });
         container.innerHTML = '';
+        plotContainers = [];
         
         // 添加占位提示
+        ensurePlotPlaceholder();
+        
+        showNotification('已清除所有图表');
+    }
+
+    function ensurePlotPlaceholder() {
+        const container = document.getElementById('plot-area-container');
+        if (container.children.length > 0) {
+            return;
+        }
         const placeholder = document.createElement('div');
         placeholder.id = 'plot-placeholder';
         placeholder.style.padding = '20px';
@@ -622,8 +790,6 @@ document.addEventListener('DOMContentLoaded', () => {
         placeholder.style.color = '#666';
         placeholder.textContent = '选择数据后点击"绘制数据"按钮来生成图表';
         container.appendChild(placeholder);
-        
-        showNotification('已清除所有图表');
     }
     
     // 修改为支持多个数据的频谱分析
@@ -646,7 +812,11 @@ document.addEventListener('DOMContentLoaded', () => {
         );
         
         const names = selectedIndices.map(colIndex => headers[colIndex]);
-        const sampleRate = parseFloat(sampleRateInput.value) || 1000;
+        const sampleRate = parseFloat(sampleRateInput.value);
+        if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
+            showNotification('采样频率必须为正数');
+            return;
+        }
         
         showLoading();
         fetch('/api/fft', {
@@ -755,29 +925,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 };
                 
                 try {
-                    // 创建新容器
-                    const { container, body, title } = createPlotContainer(
-                        selectedIndices.length === 1 
+                    const plotTitle = selectedIndices.length === 1 
                         ? `频谱分析 - ${names[0]}` 
-                        : '多数据频谱分析'
-                    );
+                        : '多数据频谱分析';
+                    const mode = getPlotMode();
+                    const { targetContainer, plotBody } = preparePlotContainer(plotTitle, mode);
                     
-                    // 添加到DOM
-                    const plotAreaElem = document.getElementById('plot-area-container');
-                    if (plotAreaElem.firstChild) {
-                        plotAreaElem.insertBefore(container, plotAreaElem.firstChild);
-                    } else {
-                        plotAreaElem.appendChild(container);
-                    }
-                    
-                    // 绘图
                     console.log("绘制频谱图:", { series: result.series.length });
-                    Plotly.newPlot(body, traces, layout, config)
-                        .then(() => {
-                            console.log("频谱图绘制成功");
-                            plotContainers.unshift(container);
-                        })
-                        .catch(err => console.error("频谱图绘制失败:", err));
+                    if (mode === 'append' && plotBody && plotBody._fullLayout) {
+                        Plotly.addTraces(plotBody, traces);
+                    } else {
+                        Plotly.newPlot(plotBody, traces, layout, config);
+                    }
                     
                     showNotification('频谱分析完成');
                 } catch (err) {
@@ -818,7 +977,11 @@ document.addEventListener('DOMContentLoaded', () => {
         );
         
         const names = selectedIndices.map(colIndex => headers[colIndex]);
-        const sampleRate = parseFloat(sampleRateInput.value) || 1000;
+        const sampleRate = parseFloat(sampleRateInput.value);
+        if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
+            showNotification('采样频率必须为正数');
+            return;
+        }
         const filterType = filterTypeSelect.value;
         
         if (filterType === 'none') {
@@ -830,6 +993,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const cutoffFreq2 = parseFloat(cutoffFreq2Input.value);
         const filterOrder = parseInt(filterOrderInput.value);
         const zeroPhase = zeroPhaseCheckbox.checked;
+
+        const nyquist = 0.5 * sampleRate;
+        if (!Number.isFinite(cutoffFreq) || cutoffFreq <= 0 || cutoffFreq >= nyquist) {
+            showNotification('截止频率必须为正数且小于奈奎斯特频率');
+            return;
+        }
+        if (!Number.isInteger(filterOrder) || filterOrder < 1) {
+            showNotification('滤波器阶数必须为正整数');
+            return;
+        }
+        if (filterType === 'bandpass' || filterType === 'bandstop') {
+            if (!Number.isFinite(cutoffFreq2) || cutoffFreq2 <= cutoffFreq || cutoffFreq2 >= nyquist) {
+                showNotification('第二截止频率必须大于第一截止频率且小于奈奎斯特频率');
+                return;
+            }
+        }
         
         // 组装请求数据
         const requestData = {
@@ -872,8 +1051,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         ? `滤波处理 - ${names[0]}`
                         : '多数据滤波处理';
                         
-                    // 创建新容器
-                    const { container, body, title } = createPlotContainer(containerTitle);
+                    const mode = getPlotMode();
+                    const { targetContainer, plotBody } = preparePlotContainer(containerTitle, mode);
                     
                     // 创建多组数据的轨迹
                     const traces = [];
@@ -1021,22 +1200,17 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                     };
                     
-                    // 添加到DOM
-                    const plotAreaElem = document.getElementById('plot-area-container');
-                    if (plotAreaElem.firstChild) {
-                        plotAreaElem.insertBefore(container, plotAreaElem.firstChild);
-                    } else {
-                        plotAreaElem.appendChild(container);
-                    }
-                    
                     // 绘图
                     console.log("绘制滤波图:", { series: result.series.length });
-                    Plotly.newPlot(body, traces, layout, config)
-                        .then(() => {
-                            console.log("滤波图绘制成功");
-                            plotContainers.unshift(container);
-                        })
-                        .catch(err => console.error("滤波图绘制失败:", err));
+                    if (mode === 'append' && plotBody && plotBody._fullLayout) {
+                        Plotly.addTraces(plotBody, traces);
+                    } else {
+                        Plotly.newPlot(plotBody, traces, layout, config)
+                            .then(() => {
+                                console.log("滤波图绘制成功");
+                            })
+                            .catch(err => console.error("滤波图绘制失败:", err));
+                    }
                     
                     showNotification('滤波处理完成');
                 } else {

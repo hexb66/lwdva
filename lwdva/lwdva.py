@@ -5,26 +5,55 @@ import argparse
 
 app = Flask(__name__, template_folder='../templates', static_folder='../static')
 
+def _parse_float(value, default=None):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _validate_sample_rate(sample_rate):
+    if sample_rate is None or not np.isfinite(sample_rate) or sample_rate <= 0:
+        return '采样频率必须为正数'
+    return None
+
+def _normalize_signals(data_field):
+    if not data_field:
+        return None, '未提供有效的数据'
+    # 多组数据
+    if isinstance(data_field, list) and len(data_field) > 0 and isinstance(data_field[0], list):
+        return data_field, None
+    # 单组数据
+    return [data_field], None
+
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/api/fft', methods=['POST'])
 def fft_analysis():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     result = {}
+    
+    signals, error = _normalize_signals(data.get('data'))
+    if error:
+        return jsonify({'error': error}), 400
+    
+    sample_rate = _parse_float(data.get('sample_rate', 1000))
+    error = _validate_sample_rate(sample_rate)
+    if error:
+        return jsonify({'error': error}), 400
     
     # 检查是否为多组数据
     if isinstance(data.get('data'), list) and isinstance(data.get('data')[0], list):
         # 多组数据处理
-        signals = data.get('data', [])
         names = data.get('names', [])
-        sample_rate = float(data.get('sample_rate', 1000))
         
         result['series'] = []
         
         for i, signal_data in enumerate(signals):
             signal_data = np.array(signal_data, dtype=float)
+            if signal_data.size < 2:
+                return jsonify({'error': '每组数据至少需要2个采样点'}), 400
             
             # 应用窗函数减少频谱泄漏
             window = signal.windows.hann(len(signal_data))
@@ -43,7 +72,8 @@ def fft_analysis():
     else:
         # 单组数据处理（保持向后兼容）
         signal_data = np.array(data.get('data', []), dtype=float)
-        sample_rate = float(data.get('sample_rate', 1000))
+        if signal_data.size < 2:
+            return jsonify({'error': '数据至少需要2个采样点'}), 400
         
         # 应用窗函数减少频谱泄漏
         window = signal.windows.hann(len(signal_data))
@@ -63,23 +93,35 @@ def fft_analysis():
 @app.route('/api/filter', methods=['POST'])
 def apply_filter():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         result = {}
+        
+        signals, error = _normalize_signals(data.get('data'))
+        if error:
+            return jsonify({'error': error}), 400
         
         # 检查是否为多组数据
         if isinstance(data.get('data'), list) and isinstance(data.get('data')[0], list):
             # 多组数据处理
-            signals = data.get('data', [])
             names = data.get('names', [])
-            sample_rate = float(data.get('sample_rate', 1000))
+            sample_rate = _parse_float(data.get('sample_rate', 1000))
             filter_type = data.get('filter_type', 'lowpass')
-            cutoff_freq = float(data.get('cutoff_freq', 100))
-            cutoff_freq2 = float(data.get('cutoff_freq2', 200))
+            cutoff_freq = _parse_float(data.get('cutoff_freq', 100))
+            cutoff_freq2 = _parse_float(data.get('cutoff_freq2', 200))
             filter_order = int(data.get('filter_order', 4))
             zero_phase = data.get('zero_phase', True)
             
             # 归一化截止频率
+            error = _validate_sample_rate(sample_rate)
+            if error:
+                return jsonify({'error': error}), 400
+            if cutoff_freq is None or cutoff_freq <= 0:
+                return jsonify({'error': '截止频率必须为正数'}), 400
+            if filter_order < 1:
+                return jsonify({'error': '滤波器阶数必须为正整数'}), 400
             nyquist = 0.5 * sample_rate
+            if cutoff_freq >= nyquist:
+                return jsonify({'error': '截止频率必须小于奈奎斯特频率'}), 400
             
             # 设计滤波器
             if filter_type == 'lowpass':
@@ -87,21 +129,30 @@ def apply_filter():
             elif filter_type == 'highpass':
                 b, a = signal.butter(filter_order, cutoff_freq / nyquist, btype='high')
             elif filter_type == 'bandpass':
-                if cutoff_freq >= cutoff_freq2:
+                if cutoff_freq2 is None or cutoff_freq >= cutoff_freq2:
                     return jsonify({'error': '带通滤波器的低截止频率必须小于高截止频率'}), 400
+                if cutoff_freq2 >= nyquist:
+                    return jsonify({'error': '高截止频率必须小于奈奎斯特频率'}), 400
                 b, a = signal.butter(filter_order, [cutoff_freq / nyquist, cutoff_freq2 / nyquist], btype='band')
             elif filter_type == 'bandstop':
-                if cutoff_freq >= cutoff_freq2:
+                if cutoff_freq2 is None or cutoff_freq >= cutoff_freq2:
                     return jsonify({'error': '带阻滤波器的低截止频率必须小于高截止频率'}), 400
+                if cutoff_freq2 >= nyquist:
+                    return jsonify({'error': '高截止频率必须小于奈奎斯特频率'}), 400
                 b, a = signal.butter(filter_order, [cutoff_freq / nyquist, cutoff_freq2 / nyquist], btype='bandstop')
             else:
                 return jsonify({'error': '不支持的滤波器类型'}), 400
                 
             result['series'] = []
+            padlen = 3 * (max(len(a), len(b)) - 1)
             
             # 对每组数据应用相同的滤波器
             for i, signal_data in enumerate(signals):
                 signal_data = np.array(signal_data, dtype=float)
+                if signal_data.size < 2:
+                    return jsonify({'error': '每组数据至少需要2个采样点'}), 400
+                if zero_phase and signal_data.size <= padlen:
+                    return jsonify({'error': '数据长度过短，无法进行零相位滤波'}), 400
                 
                 # 应用滤波器
                 if zero_phase:
@@ -129,15 +180,24 @@ def apply_filter():
         else:
             # 单组数据处理（保持向后兼容）
             signal_data = np.array(data.get('data', []), dtype=float)
-            sample_rate = float(data.get('sample_rate', 1000))
+            sample_rate = _parse_float(data.get('sample_rate', 1000))
             filter_type = data.get('filter_type', 'lowpass')
-            cutoff_freq = float(data.get('cutoff_freq', 100))
-            cutoff_freq2 = float(data.get('cutoff_freq2', 200))
+            cutoff_freq = _parse_float(data.get('cutoff_freq', 100))
+            cutoff_freq2 = _parse_float(data.get('cutoff_freq2', 200))
             filter_order = int(data.get('filter_order', 4))
             zero_phase = data.get('zero_phase', True)
             
             # 归一化截止频率 (Wn = 2 * cutoff_freq / sample_rate)
+            error = _validate_sample_rate(sample_rate)
+            if error:
+                return jsonify({'error': error}), 400
+            if cutoff_freq is None or cutoff_freq <= 0:
+                return jsonify({'error': '截止频率必须为正数'}), 400
+            if filter_order < 1:
+                return jsonify({'error': '滤波器阶数必须为正整数'}), 400
             nyquist = 0.5 * sample_rate
+            if cutoff_freq >= nyquist:
+                return jsonify({'error': '截止频率必须小于奈奎斯特频率'}), 400
             
             # 设计滤波器
             if filter_type == 'lowpass':
@@ -145,17 +205,26 @@ def apply_filter():
             elif filter_type == 'highpass':
                 b, a = signal.butter(filter_order, cutoff_freq / nyquist, btype='high')
             elif filter_type == 'bandpass':
-                if cutoff_freq >= cutoff_freq2:
+                if cutoff_freq2 is None or cutoff_freq >= cutoff_freq2:
                     return jsonify({'error': '带通滤波器的低截止频率必须小于高截止频率'}), 400
+                if cutoff_freq2 >= nyquist:
+                    return jsonify({'error': '高截止频率必须小于奈奎斯特频率'}), 400
                 b, a = signal.butter(filter_order, [cutoff_freq / nyquist, cutoff_freq2 / nyquist], btype='band')
             elif filter_type == 'bandstop':
-                if cutoff_freq >= cutoff_freq2:
+                if cutoff_freq2 is None or cutoff_freq >= cutoff_freq2:
                     return jsonify({'error': '带阻滤波器的低截止频率必须小于高截止频率'}), 400
+                if cutoff_freq2 >= nyquist:
+                    return jsonify({'error': '高截止频率必须小于奈奎斯特频率'}), 400
                 b, a = signal.butter(filter_order, [cutoff_freq / nyquist, cutoff_freq2 / nyquist], btype='bandstop')
             else:
                 return jsonify({'error': '不支持的滤波器类型'}), 400
             
             # 应用滤波器
+            if signal_data.size < 2:
+                return jsonify({'error': '数据至少需要2个采样点'}), 400
+            padlen = 3 * (max(len(a), len(b)) - 1)
+            if zero_phase and signal_data.size <= padlen:
+                return jsonify({'error': '数据长度过短，无法进行零相位滤波'}), 400
             if zero_phase:
                 # 使用前向-后向滤波实现零相位滤波
                 filtered_data = signal.filtfilt(b, a, signal_data)
