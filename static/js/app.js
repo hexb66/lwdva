@@ -21,6 +21,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const filterOrderInput = document.getElementById('filter-order');
     const zeroPhaseCheckbox = document.getElementById('zero-phase');
     const loadingElement = document.getElementById('loading');
+    const loadingSpinner = document.getElementById('loading-spinner');
+    const loadingMessageEl = document.getElementById('loading-message');
+    const loadingProgressFill = document.getElementById('loading-progress-fill');
+    const loadingPercentEl = document.getElementById('loading-percent');
     const notification = document.getElementById('notification');
     const dataInfo = document.getElementById('data-info');
     
@@ -33,6 +37,10 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 状态变量
     let csvData = null;
+    /** 服务端大文件二进制导入：行主序 Float64，避免超大 JSON.parse */
+    let csvDataFlat = null;
+    let csvNumRows = 0;
+    let csvNumCols = 0;
     let headers = [];
     let selectedColumns = new Set(); // 存储选中的Y轴列索引
     let xAxisColumn = -1; // 存储X轴列索引，默认为-1（表示使用序列号）
@@ -81,12 +89,30 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     
     // 工具函数
+    function setLoadingProgressUI(fraction, message) {
+        if (message != null && loadingMessageEl) {
+            loadingMessageEl.textContent = message;
+        }
+        const pct = Math.max(0, Math.min(100, Math.round(fraction * 100)));
+        if (loadingProgressFill) {
+            loadingProgressFill.style.width = `${pct}%`;
+        }
+        if (loadingPercentEl) {
+            loadingPercentEl.textContent = `${pct}%`;
+        }
+    }
+
     function showLoading() {
         loadingElement.style.display = 'block';
+        if (loadingSpinner) {
+            loadingSpinner.style.display = 'inline-block';
+        }
+        setLoadingProgressUI(0, '处理中...');
     }
-    
+
     function hideLoading() {
         loadingElement.style.display = 'none';
+        setLoadingProgressUI(0, '处理中...');
     }
     
     function showNotification(message, duration = 3000) {
@@ -226,17 +252,22 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 更新数据信息显示
     function updateDataInfo() {
-        if (!csvData || headers.length === 0) {
+        if (!Array.isArray(headers) || headers.length === 0) {
             dataInfo.innerHTML = '<p>未加载数据</p>';
             return;
         }
-        
+        if (csvDataFlat === null && !Array.isArray(csvData)) {
+            dataInfo.innerHTML = '<p>未加载数据</p>';
+            return;
+        }
+        const rowCount = csvDataFlat ? csvNumRows : csvData.length;
+
         let infoHTML = `
             <p><strong>文件信息:</strong></p>
             <p><i class="fas fa-file-alt"></i> 文件名: ${currentFileName}</p>
             <p><i class="fas fa-folder-open"></i> 文件路径: ${currentFilePath}</p>
             <p><i class="fas fa-table"></i> 列数: ${headers.length}</p>
-            <p><i class="fas fa-list-ol"></i> 行数: ${csvData.length}</p>
+            <p><i class="fas fa-list-ol"></i> 行数: ${rowCount}</p>
             <p><i class="fas fa-wave-square"></i> 采样频率: ${sampleRateInput.value} Hz</p>
             <p><i class="fas fa-code"></i> 分隔符: "${delimiterInput.value}"</p>
         `;
@@ -281,6 +312,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function setLoadedData(newHeaders, newRows, warningMessage, metadata = null) {
+        if (!Array.isArray(newHeaders) || !Array.isArray(newRows)) {
+            throw new Error('导入结果无效：缺少列名或数据行（若为超大文件，可能是 JSON 解析失败）');
+        }
+        csvDataFlat = null;
+        csvNumRows = 0;
+        csvNumCols = 0;
         headers = newHeaders;
         csvData = newRows;
         currentMetadata = metadata;
@@ -290,9 +327,230 @@ document.addEventListener('DOMContentLoaded', () => {
         updateXAxisSelect();
         renderColumnList();
         updateDataInfo();
-        showNotification(`成功导入数据: ${headers.length} 列, ${csvData.length} 行`);
+        showNotification(`成功导入数据: ${headers.length} 列, ${newRows.length} 行`);
         if (warningMessage) {
             showNotification(`导入警告: ${warningMessage}`, 6000);
+        }
+    }
+
+    /**
+     * 超过此大小的 CSV/TXT 走服务端解析（上传 + 全量 JSON 较慢，适合超大文件避免浏览器单字符串上限）。
+     * 阈值不宜过低：否则几百 MB 的文件会明显卡在「处理中」（网络上传与服务端/JSON 解析耗时）。
+     * 约 512MiB 以下仍用本地 FileReader，与原先体验一致；更大文件（如 700MB+）走 /api/csv。
+     */
+    const LARGE_CSV_BYTE_THRESHOLD = 512 * 1024 * 1024;
+
+    function buildDelimitedImportWarnings(warnings) {
+        if (!warnings) {
+            return '';
+        }
+        const parts = [];
+        if (warnings.paddedLines && warnings.paddedLines.length > 0) {
+            parts.push(`部分行列数不足，已补齐(示例行: ${warnings.paddedLines.slice(0, 3).join(', ')})`);
+        }
+        if (warnings.trimmedLines && warnings.trimmedLines.length > 0) {
+            parts.push(`部分行列数过多，已截断(示例行: ${warnings.trimmedLines.slice(0, 3).join(', ')})`);
+        }
+        if (warnings.nonNumericCount > 0) {
+            parts.push(`发现 ${warnings.nonNumericCount} 个非数值字段，已按0处理`);
+        }
+        return parts.join('；');
+    }
+
+    function getCsvRowCount() {
+        if (csvDataFlat) return csvNumRows;
+        return Array.isArray(csvData) ? csvData.length : 0;
+    }
+
+    function columnAsNumbers(colIndex) {
+        if (csvDataFlat) {
+            const nr = csvNumRows;
+            const nc = csvNumCols;
+            const out = new Float64Array(nr);
+            for (let r = 0; r < nr; r++) {
+                out[r] = csvDataFlat[r * nc + colIndex];
+            }
+            return out;
+        }
+        return csvData.map(row => parseFloat(row[colIndex]) || 0);
+    }
+
+    function setLoadedDataFromMatrix(newHeaders, flat, nRows, nCols, warningMessage, metadata) {
+        if (!Array.isArray(newHeaders) || !(flat instanceof Float64Array)) {
+            throw new Error('二进制导入数据无效');
+        }
+        if (newHeaders.length !== nCols || nRows * nCols !== flat.length) {
+            throw new Error('二进制数据维度与列数不一致');
+        }
+        headers = newHeaders;
+        csvData = null;
+        csvDataFlat = flat;
+        csvNumRows = nRows;
+        csvNumCols = nCols;
+        currentMetadata = metadata;
+        selectedColumns.clear();
+        xAxisColumn = -1;
+        initializeColors();
+        updateXAxisSelect();
+        renderColumnList();
+        updateDataInfo();
+        showNotification(`成功导入数据: ${headers.length} 列, ${csvNumRows} 行`);
+        if (warningMessage) {
+            showNotification(`导入警告: ${warningMessage}`, 6000);
+        }
+    }
+
+    function parseBinaryCsvResult(buffer) {
+        const v = new DataView(buffer);
+        if (buffer.byteLength < 4) {
+            throw new Error('响应数据过短');
+        }
+        const jsonLen = v.getUint32(0, true);
+        if (jsonLen <= 0 || jsonLen > 64 * 1024 * 1024) {
+            throw new Error('元数据长度异常');
+        }
+        let o = 4;
+        if (buffer.byteLength < o + jsonLen) {
+            throw new Error('元数据不完整');
+        }
+        const metaStr = new TextDecoder('utf-8').decode(new Uint8Array(buffer, o, jsonLen));
+        o += jsonLen;
+        // Float64Array 要求 byteOffset 为 8 的倍数，元数据 UTF-8 长度任意，需跳过对齐填充
+        const alignPad = (8 - (o % 8)) % 8;
+        o += alignPad;
+        const meta = JSON.parse(metaStr);
+        const { headers: h, warnings, metadata, n_rows: nRows, n_cols: nCols } = meta;
+        const el = nRows * nCols;
+        const need = el * 8;
+        if (buffer.byteLength < o + need) {
+            throw new Error('数值区不完整');
+        }
+        let flat;
+        try {
+            if (el === 0) {
+                flat = new Float64Array(0);
+            } else {
+                flat = new Float64Array(el);
+                flat.set(new Float64Array(buffer, o, el));
+            }
+        } catch (e) {
+            throw new Error(`解析二进制数值区失败: ${e.message || e}`);
+        }
+        const warningText = buildDelimitedImportWarnings(warnings);
+        setLoadedDataFromMatrix(h, flat, nRows, nCols, warningText, metadata || null);
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function xhrPostFormData(url, formData, onUploadProgress) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', url);
+            xhr.upload.onprogress = e => {
+                if (e.lengthComputable && typeof onUploadProgress === 'function') {
+                    onUploadProgress(e.loaded / e.total);
+                }
+            };
+            xhr.onload = () => {
+                let data;
+                try {
+                    data = JSON.parse(xhr.responseText || '{}');
+                } catch (err) {
+                    reject(new Error('无法解析服务器响应'));
+                    return;
+                }
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve(data);
+                } else {
+                    reject(new Error(data.error || xhr.statusText || '请求失败'));
+                }
+            };
+            xhr.onerror = () => reject(new Error('网络错误'));
+            xhr.send(formData);
+        });
+    }
+
+    async function handleLargeDelimitedFile(file) {
+        showLoading();
+        const formData = new FormData();
+        formData.append('file', file);
+        const delimiter = delimiterInput.value ? delimiterInput.value.replace(/\\t/g, '\t') : ',';
+        formData.append('delimiter', delimiter);
+
+        try {
+            setLoadingProgressUI(0, '正在上传…');
+            const uploadJson = await xhrPostFormData('/api/csv/upload', formData, uploadFraction => {
+                setLoadingProgressUI(uploadFraction * 0.38, '正在上传…');
+            });
+            const jobId = uploadJson.job_id;
+            if (!jobId) {
+                throw new Error(uploadJson.error || '上传未返回任务 ID');
+            }
+
+            const parseRes = await fetch('/api/csv/parse', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ job_id: jobId })
+            });
+            const parseJson = await parseRes.json().catch(() => ({}));
+            if (!parseRes.ok) {
+                throw new Error(parseJson.error || '无法启动服务器解析');
+            }
+
+            setLoadingProgressUI(0.4, '正在读取与解析 CSV…');
+            const deadline = Date.now() + 7200 * 1000;
+            while (Date.now() < deadline) {
+                const stRes = await fetch(`/api/csv/status?job_id=${encodeURIComponent(jobId)}`);
+                const st = await stRes.json().catch(() => ({}));
+                if (!stRes.ok) {
+                    throw new Error(st.error || '无法获取解析状态');
+                }
+                if (st.status === 'error') {
+                    throw new Error(st.error || '解析失败');
+                }
+                if (st.status === 'done') {
+                    setLoadingProgressUI(0.96, '正在接收数据…');
+                    break;
+                }
+                const parsePct = typeof st.percent === 'number' ? st.percent : 0;
+                let parseMsg = '正在读取与解析 CSV…';
+                if (parsePct >= 80) {
+                    parseMsg = '正在生成表格数据（大文件需数十秒至数分钟）…';
+                } else if (parsePct >= 64) {
+                    parseMsg = '正在转换数值与填充…';
+                }
+                setLoadingProgressUI(0.4 + (parsePct / 100) * 0.56, parseMsg);
+                await sleep(250);
+            }
+            if (Date.now() >= deadline) {
+                throw new Error('解析超时，请稍后重试或缩小文件');
+            }
+
+            const resultRes = await fetch(
+                `/api/csv/result?job_id=${encodeURIComponent(jobId)}&format=binary`
+            );
+            if (!resultRes.ok) {
+                const errText = await resultRes.text();
+                let msg = '获取解析结果失败';
+                try {
+                    const ej = JSON.parse(errText);
+                    if (ej.error) msg = ej.error;
+                } catch (e) {
+                    if (errText) msg = errText.slice(0, 200);
+                }
+                throw new Error(msg);
+            }
+            const buf = await resultRes.arrayBuffer();
+            parseBinaryCsvResult(buf);
+
+            setLoadingProgressUI(1, '完成');
+        } catch (error) {
+            showNotification(`错误: ${error.message}`, 5000);
+            console.error(error);
+        } finally {
+            hideLoading();
         }
     }
 
@@ -354,6 +612,16 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        const isLargeDelimited =
+            file.name &&
+            !file.name.toLowerCase().endsWith('.npz') &&
+            typeof file.size === 'number' &&
+            file.size > LARGE_CSV_BYTE_THRESHOLD;
+        if (isLargeDelimited) {
+            handleLargeDelimitedFile(file);
+            return;
+        }
+
         reader.onload = e => {
             try {
                 const content = e.target.result;
@@ -367,17 +635,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     rowCount: parsed.rows.length
                 });
                 
-                const warningParts = [];
-                if (parsed.warnings.paddedLines.length > 0) {
-                    warningParts.push(`部分行列数不足，已补齐(示例行: ${parsed.warnings.paddedLines.slice(0, 3).join(', ')})`);
-                }
-                if (parsed.warnings.trimmedLines.length > 0) {
-                    warningParts.push(`部分行列数过多，已截断(示例行: ${parsed.warnings.trimmedLines.slice(0, 3).join(', ')})`);
-                }
-                if (parsed.warnings.nonNumericCount > 0) {
-                    warningParts.push(`发现 ${parsed.warnings.nonNumericCount} 个非数值字段，已按0处理`);
-                }
-                setLoadedData(parsed.headers, parsed.rows, warningParts.join('；'), null);
+                const warningParts = buildDelimitedImportWarnings(parsed.warnings);
+                setLoadedData(parsed.headers, parsed.rows, warningParts, null);
                 
                 // 不自动切换标签页，让用户看到导入信息
                 // switchTab('select');
@@ -596,7 +855,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 简化版的绘图函数
     function plotSelectedData() {
-        if (!csvData || csvData.length === 0 || selectedColumns.size === 0) {
+        if (headers.length === 0 || getCsvRowCount() === 0 || selectedColumns.size === 0) {
             showNotification('请选择至少一个Y轴数据列');
             return;
         }
@@ -792,10 +1051,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // 获取X轴数据
     function getXAxisValues() {
         if (xAxisColumn >= 0) {
-            return csvData.map(row => parseFloat(row[xAxisColumn]) || 0);
-        } else {
-            return Array.from({ length: csvData.length }, (_, i) => i + 1);
+            return columnAsNumbers(xAxisColumn);
         }
+        return Array.from({ length: getCsvRowCount() }, (_, i) => i + 1);
     }
     
     // 获取Y轴数据
@@ -804,7 +1062,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const normalizationMethod = normalizationMethodSelect.value;
         
         selectedColumns.forEach(colIndex => {
-            let yValues = csvData.map(row => parseFloat(row[colIndex]) || 0);
+            let yValues = columnAsNumbers(colIndex);
 
             if (shouldDiff) {
                 yValues = calculateDifference(yValues, sampleRate);
@@ -913,17 +1171,17 @@ document.addEventListener('DOMContentLoaded', () => {
             parseInt(input.id.replace('col-', ''))
         );
         
-        const dataArray = selectedIndices.map(colIndex => 
-            csvData.map(row => row[colIndex])
+        const dataArray = selectedIndices.map(colIndex =>
+            Array.from(columnAsNumbers(colIndex))
         );
-        
+
         const names = selectedIndices.map(colIndex => headers[colIndex]);
         const sampleRate = parseFloat(sampleRateInput.value);
         if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
             showNotification('采样频率必须为正数');
             return;
         }
-        
+
         showLoading();
         fetch('/api/fft', {
             method: 'POST',
@@ -1078,10 +1336,10 @@ document.addEventListener('DOMContentLoaded', () => {
             parseInt(input.id.replace('col-', ''))
         );
         
-        const dataArray = selectedIndices.map(colIndex => 
-            csvData.map(row => row[colIndex])
+        const dataArray = selectedIndices.map(colIndex =>
+            Array.from(columnAsNumbers(colIndex))
         );
-        
+
         const names = selectedIndices.map(colIndex => headers[colIndex]);
         const sampleRate = parseFloat(sampleRateInput.value);
         if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
@@ -1144,9 +1402,9 @@ document.addEventListener('DOMContentLoaded', () => {
             // 获取X轴数据
             let xValues;
             if (xAxisColumn >= 0) {
-                xValues = csvData.map(row => row[xAxisColumn]);
+                xValues = Array.from(columnAsNumbers(xAxisColumn));
             } else {
-                xValues = Array.from({ length: csvData.length }, (_, i) => i + 1);
+                xValues = Array.from({ length: getCsvRowCount() }, (_, i) => i + 1);
             }
             
             try {
@@ -1452,67 +1710,111 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 添加归一化数据处理函数
     function normalizeData(data, method) {
+        const n = data.length;
+        const toArray = () => {
+            const a = new Array(n);
+            for (let i = 0; i < n; i++) a[i] = data[i];
+            return a;
+        };
         switch (method) {
             case 'minmax': {
-                // Min-Max归一化 (0-1)
-                const minVal = Math.min(...data);
-                const maxVal = Math.max(...data);
+                let minVal = Infinity;
+                let maxVal = -Infinity;
+                for (let i = 0; i < n; i++) {
+                    const v = data[i];
+                    if (v < minVal) minVal = v;
+                    if (v > maxVal) maxVal = v;
+                }
                 const range = maxVal - minVal;
-                
-                if (range === 0) return data;
-                return data.map(y => (y - minVal) / range);
+                if (range === 0) return toArray();
+                const out = new Array(n);
+                for (let i = 0; i < n; i++) {
+                    out[i] = (data[i] - minVal) / range;
+                }
+                return out;
             }
-            
+
             case 'zscore': {
-                // Z-Score标准化 (均值=0, 标准差=1)
-                const mean = data.reduce((sum, val) => sum + val, 0) / data.length;
-                const variance = data.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / data.length;
+                let sum = 0;
+                for (let i = 0; i < n; i++) sum += data[i];
+                const mean = sum / n;
+                let varSum = 0;
+                for (let i = 0; i < n; i++) {
+                    varSum += (data[i] - mean) * (data[i] - mean);
+                }
+                const variance = varSum / n;
                 const stdDev = Math.sqrt(variance);
-                
-                if (stdDev === 0) return data.map(() => 0);
-                return data.map(y => (y - mean) / stdDev);
+                if (stdDev === 0) {
+                    const z = new Array(n);
+                    z.fill(0);
+                    return z;
+                }
+                const out = new Array(n);
+                for (let i = 0; i < n; i++) {
+                    out[i] = (data[i] - mean) / stdDev;
+                }
+                return out;
             }
-            
+
             case 'maxabs': {
-                // 最大绝对值缩放
-                const maxAbs = Math.max(...data.map(Math.abs));
-                
-                if (maxAbs === 0) return data;
-                return data.map(y => y / maxAbs);
+                let maxAbs = 0;
+                for (let i = 0; i < n; i++) {
+                    const a = Math.abs(data[i]);
+                    if (a > maxAbs) maxAbs = a;
+                }
+                if (maxAbs === 0) return toArray();
+                const out = new Array(n);
+                for (let i = 0; i < n; i++) {
+                    out[i] = data[i] / maxAbs;
+                }
+                return out;
             }
-            
+
             case 'robust': {
-                // 健壮缩放 (基于中位数和四分位距)
-                const sorted = [...data].sort((a, b) => a - b);
+                const sorted = Array.from(data).sort((a, b) => a - b);
                 const median = sorted[Math.floor(sorted.length / 2)];
                 const q1 = sorted[Math.floor(sorted.length / 4)];
                 const q3 = sorted[Math.floor(3 * sorted.length / 4)];
                 const iqr = q3 - q1;
-                
-                if (iqr === 0) return data.map(y => y - median);
-                return data.map(y => (y - median) / iqr);
+                const out = new Array(n);
+                if (iqr === 0) {
+                    for (let i = 0; i < n; i++) out[i] = data[i] - median;
+                } else {
+                    for (let i = 0; i < n; i++) {
+                        out[i] = (data[i] - median) / iqr;
+                    }
+                }
+                return out;
             }
-            
+
             case 'log': {
-                // 对数变换 (处理负值和零值)
-                const minVal = Math.min(...data);
-                // 如果有负值或零值，添加偏移量使最小值为1
+                let minVal = Infinity;
+                for (let i = 0; i < n; i++) {
+                    if (data[i] < minVal) minVal = data[i];
+                }
                 const offset = minVal < 1 ? 1 - minVal : 0;
-                
-                return data.map(y => Math.log(y + offset));
+                const out = new Array(n);
+                for (let i = 0; i < n; i++) {
+                    out[i] = Math.log(data[i] + offset);
+                }
+                return out;
             }
-            
+
             case 'sqrt': {
-                // 平方根变换 (处理负值)
-                const minVal = Math.min(...data);
-                // 如果有负值，添加偏移量使最小值为0
+                let minVal = Infinity;
+                for (let i = 0; i < n; i++) {
+                    if (data[i] < minVal) minVal = data[i];
+                }
                 const offset = minVal < 0 ? -minVal : 0;
-                
-                return data.map(y => Math.sqrt(y + offset));
+                const out = new Array(n);
+                for (let i = 0; i < n; i++) {
+                    out[i] = Math.sqrt(data[i] + offset);
+                }
+                return out;
             }
-            
+
             default:
-                return data;
+                return toArray();
         }
     }
 

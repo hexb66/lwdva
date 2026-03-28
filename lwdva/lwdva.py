@@ -1,9 +1,26 @@
-from flask import Flask, render_template, request, jsonify
+import json
+
+from flask import Flask, Response, render_template, request, jsonify
+import argparse
+import io
+import os
+import struct
+import tempfile
+import threading
+import uuid
 import numpy as np
 from scipy import signal
-import argparse
+
+try:
+    import pandas as pd
+    _HAS_PANDAS = True
+except ImportError:
+    pd = None
+    _HAS_PANDAS = False
 
 app = Flask(__name__, template_folder='../templates', static_folder='../static')
+# 允许上传大体积 CSV（默认 Werkzeug 无上限，此处显式放宽常见部署限制）
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
 
 def _parse_float(value, default=None):
     try:
@@ -97,6 +114,316 @@ def _npz_to_table(npz_file):
         'metadata': metadata,
         'warnings': warnings
     }, None
+
+
+def _parse_delimited_line(line, delimiter):
+    """与前端 parseDelimitedLine 一致：单字符分隔符支持引号转义。"""
+    if not delimiter or len(delimiter) != 1:
+        sep = delimiter if delimiter else ','
+        return line.split(sep)
+    d = delimiter[0]
+    fields = []
+    current = []
+    in_quotes = False
+    i = 0
+    n = len(line)
+    while i < n:
+        char = line[i]
+        if char == '"':
+            nxt = line[i + 1] if i + 1 < n else ''
+            if in_quotes and nxt == '"':
+                current.append('"')
+                i += 2
+                continue
+            in_quotes = not in_quotes
+            i += 1
+            continue
+        if char == d and not in_quotes:
+            fields.append(''.join(current))
+            current = []
+            i += 1
+            continue
+        current.append(char)
+        i += 1
+    fields.append(''.join(current))
+    return fields
+
+
+def _csv_stream_to_table(text_stream, delimiter):
+    """按行流式读取，避免整文件读入单个字符串（与前端 parseDelimitedContent 行为对齐）。"""
+    warnings = {
+        'paddedLines': [],
+        'trimmedLines': [],
+        'malformedLines': [],
+        'nonNumericCount': 0,
+    }
+    headers = None
+    rows = []
+    last_values = None
+    line_no = 0
+
+    for raw_line in text_stream:
+        line_no += 1
+        line = raw_line.rstrip('\r\n')
+        if headers is None:
+            if line.strip() == '':
+                continue
+            raw_headers = _parse_delimited_line(line, delimiter)
+            headers = [h.strip() for h in raw_headers]
+            last_values = [0.0] * len(headers)
+            continue
+        if line.strip() == '':
+            continue
+        fields = _parse_delimited_line(line, delimiter)
+        if len(fields) < len(headers):
+            warnings['paddedLines'].append(line_no)
+            while len(fields) < len(headers):
+                fields.append('')
+        elif len(fields) > len(headers):
+            warnings['trimmedLines'].append(line_no)
+            del fields[len(headers):]
+
+        numeric_row = []
+        for index, value in enumerate(fields):
+            trimmed = value.strip()
+            if trimmed == '':
+                numeric_row.append(last_values[index])
+                continue
+            try:
+                num = float(trimmed)
+            except (TypeError, ValueError):
+                warnings['nonNumericCount'] += 1
+                numeric_row.append(last_values[index])
+                continue
+            if not np.isfinite(num):
+                warnings['nonNumericCount'] += 1
+                numeric_row.append(last_values[index])
+                continue
+            last_values[index] = num
+            numeric_row.append(num)
+        rows.append(numeric_row)
+
+    if headers is None:
+        return None, '文件为空'
+
+    return {
+        'headers': headers,
+        'rows': rows,
+        'metadata': {},
+        'warnings': warnings,
+    }, None
+
+
+_csv_jobs = {}
+_csv_jobs_lock = threading.Lock()
+
+
+def _csv_job_update(job_id, **kwargs):
+    with _csv_jobs_lock:
+        if job_id in _csv_jobs:
+            _csv_jobs[job_id].update(kwargs)
+
+
+class _ProgressBinaryReader(io.RawIOBase):
+    """包装二进制读，根据已读字节更新解析进度（供 pandas 读大文件时回调）。"""
+
+    def __init__(self, path, job_id, total_size):
+        super().__init__()
+        self._path = path
+        self._f = open(path, 'rb')
+        self._job_id = job_id
+        self._total = max(total_size, 1)
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self._f.tell()
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        pos = self._f.seek(offset, whence)
+        self._report()
+        return pos
+
+    def read(self, size=-1):
+        data = self._f.read(size)
+        self._report()
+        return data
+
+    def readinto(self, b):
+        n = self._f.readinto(b)
+        self._report()
+        return n
+
+    def close(self):
+        if self._f:
+            self._f.close()
+            self._f = None
+
+    def _report(self):
+        if not self._f:
+            return
+        pos = self._f.tell()
+        # 读文件只占整体进度的一部分，避免读完后长时间卡在 99%（后续数值整理与 tolist 很慢）
+        pct = min(62, int(62 * pos / self._total))
+        _csv_job_update(self._job_id, phase='parse', percent=pct)
+
+
+def _csv_pandas_file_to_table(path, delimiter, job_id=None, file_size=None):
+    """使用 pandas C 引擎解析，数值规则与前端一致：无法解析的单元格前向填充，首部缺省为 0。"""
+    if not _HAS_PANDAS:
+        return None, '未安装 pandas，请执行 pip install pandas'
+
+    sep = delimiter if delimiter else ','
+    engine = 'c' if len(sep) == 1 else 'python'
+    read_kw = {
+        'filepath_or_buffer': path,
+        'sep': sep,
+        'header': 0,
+        'encoding': 'utf-8-sig',
+        'engine': engine,
+        'low_memory': False,
+        'skipinitialspace': True,
+    }
+    buffer = path
+    if job_id is not None and file_size:
+        buffer = _ProgressBinaryReader(path, job_id, file_size)
+        read_kw['filepath_or_buffer'] = buffer
+
+    warnings_out = {
+        'paddedLines': [],
+        'trimmedLines': [],
+        'malformedLines': [],
+        'nonNumericCount': 0,
+    }
+
+    try:
+        df = pd.read_csv(**read_kw)
+    except Exception:
+        return None, None
+    finally:
+        if isinstance(buffer, _ProgressBinaryReader):
+            buffer.close()
+
+    if len(df.columns) == 0:
+        return None, '文件为空'
+
+    if job_id:
+        _csv_job_update(job_id, phase='parse', percent=64)
+
+    headers = [str(c).strip() for c in df.columns.tolist()]
+    stripped = df.apply(lambda col: col.astype(str).str.strip())
+    if job_id:
+        _csv_job_update(job_id, phase='parse', percent=70)
+    coerced = stripped.apply(pd.to_numeric, errors='coerce')
+    non_blank = stripped.ne('') & stripped.notna()
+    warnings_out['nonNumericCount'] = int((non_blank & coerced.isna()).sum().sum())
+    if job_id:
+        _csv_job_update(job_id, phase='parse', percent=76)
+    filled = coerced.ffill(axis=0).fillna(0.0)
+    arr = filled.to_numpy(dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        warnings_out['nonNumericCount'] += int((~np.isfinite(arr)).sum())
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    if job_id:
+        _csv_job_update(job_id, phase='parse', percent=98)
+    # 保留二维 ndarray，避免 tolist 占用双倍内存；大文件由 /api/csv/result?format=binary 下发
+    return {
+        'headers': headers,
+        'matrix': np.ascontiguousarray(arr, dtype=np.float64),
+        'rows': None,
+        'metadata': {},
+        'warnings': warnings_out,
+    }, None
+
+
+def _csv_file_to_table_best_effort(path, delimiter, job_id=None, file_size=None):
+    """优先 pandas；失败则回退到流式逐行解析（较慢，兼容怪异格式）。"""
+    if _HAS_PANDAS:
+        result, err = _csv_pandas_file_to_table(path, delimiter, job_id, file_size)
+        if err is None and result is not None:
+            return result, None
+        if err:
+            return None, err
+
+    try:
+        with open(path, 'r', encoding='utf-8-sig', newline='') as f:
+            return _csv_stream_to_table(f, delimiter)
+    except UnicodeDecodeError as e:
+        return None, f'文件编码无法按 UTF-8 解码: {e}'
+    except Exception as e:
+        return None, str(e)
+
+
+def _serialize_csv_result_binary(result):
+    """
+    二进制格式（避免超大 JSON 超出浏览器单字符串 / JSON.parse 限制）:
+    uint32 LE: meta_json 字节长度
+    meta_json: UTF-8 JSON，含 headers, warnings, metadata, n_rows, n_cols
+    0~7 字节 0 填充，使 float64 区起始偏移为 8 的倍数（否则 JS 的 Float64Array(buffer,off) 会抛错）
+    其后 n_rows * n_cols 个 float64，C 连续、行主序（与 numpy C 顺序一致）
+    """
+    if result.get('matrix') is not None:
+        arr = np.ascontiguousarray(result['matrix'], dtype=np.float64)
+    else:
+        rows = result.get('rows')
+        if not rows:
+            arr = np.zeros((0, len(result.get('headers') or [])), dtype=np.float64)
+        else:
+            arr = np.ascontiguousarray(np.array(rows, dtype=np.float64))
+    if arr.ndim != 2:
+        raise ValueError('内部数据维度应为二维')
+    n_r = int(arr.shape[0])
+    n_c = int(arr.shape[1])
+    meta = {
+        'headers': [str(h) for h in (result.get('headers') or [])],
+        'warnings': result.get('warnings') or {},
+        'metadata': result.get('metadata') or {},
+        'n_rows': n_r,
+        'n_cols': n_c,
+    }
+    meta_json = json.dumps(meta, ensure_ascii=False, allow_nan=False).encode('utf-8')
+    if len(meta_json) > 64 * 1024 * 1024:
+        raise ValueError('列名或元数据过大')
+    header = struct.pack('<I', len(meta_json)) + meta_json
+    align_pad = (8 - (len(header) % 8)) % 8
+    header += b'\x00' * align_pad
+    if arr.size:
+        return header + memoryview(arr).tobytes()
+    return header
+
+
+def _run_csv_parse_job(job_id):
+    path = None
+    try:
+        with _csv_jobs_lock:
+            job = _csv_jobs.get(job_id)
+            if not job:
+                return
+            path = job['path']
+            delimiter = job['delimiter']
+            size = job['size']
+
+        _csv_job_update(job_id, status='parsing', phase='parse', percent=0)
+        result, error = _csv_file_to_table_best_effort(path, delimiter, job_id, size)
+
+        if error:
+            _csv_job_update(job_id, status='error', error=error, percent=100)
+            return
+
+        _csv_job_update(job_id, status='done', phase='done', percent=100, result=result)
+    except Exception as e:
+        _csv_job_update(job_id, status='error', error=str(e), percent=100)
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
 
 @app.route('/')
 def index():
@@ -337,6 +664,127 @@ def load_npz():
             return jsonify(result)
     except Exception as e:
         return jsonify({'error': f'无法解析npz文件: {e}'}), 400
+
+
+@app.route('/api/csv/upload', methods=['POST'])
+def csv_upload():
+    """大文件分步导入：先上传落盘，返回 job_id（便于前端显示上传进度）。"""
+    if 'file' not in request.files:
+        return jsonify({'error': '缺少文件'}), 400
+    upload = request.files['file']
+    if not upload or upload.filename == '':
+        return jsonify({'error': '文件名为空'}), 400
+    delim_raw = request.form.get('delimiter') or ','
+    delimiter = delim_raw.replace('\\t', '\t')
+    job_id = str(uuid.uuid4())
+    fd, path = tempfile.mkstemp(prefix='lwdva_csv_', suffix='.upload')
+    os.close(fd)
+    try:
+        upload.stream.seek(0)
+        upload.save(path)
+        size = os.path.getsize(path)
+        with _csv_jobs_lock:
+            _csv_jobs[job_id] = {
+                'path': path,
+                'delimiter': delimiter,
+                'size': size,
+                'status': 'uploaded',
+                'phase': 'upload',
+                'percent': 0,
+                'error': None,
+                'result': None,
+            }
+        return jsonify({'job_id': job_id, 'size': size})
+    except Exception as e:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return jsonify({'error': f'保存上传文件失败: {e}'}), 500
+
+
+@app.route('/api/csv/parse', methods=['POST'])
+def csv_parse_start():
+    """在后台线程解析已上传的 CSV（客户端轮询 /api/csv/status）。"""
+    data = request.get_json(silent=True) or {}
+    job_id = data.get('job_id')
+    if not job_id:
+        return jsonify({'error': '缺少 job_id'}), 400
+    with _csv_jobs_lock:
+        job = _csv_jobs.get(job_id)
+        if not job:
+            return jsonify({'error': '无效或已过期的任务'}), 404
+        if job['status'] != 'uploaded':
+            return jsonify({'error': '任务状态不允许再次解析'}), 400
+        job['status'] = 'queued'
+        job['error'] = None
+        job['result'] = None
+    thread = threading.Thread(target=_run_csv_parse_job, args=(job_id,), daemon=True)
+    thread.start()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/csv/status', methods=['GET'])
+def csv_status():
+    job_id = request.args.get('job_id')
+    if not job_id:
+        return jsonify({'error': '缺少 job_id'}), 400
+    with _csv_jobs_lock:
+        job = _csv_jobs.get(job_id)
+        if not job:
+            return jsonify({'error': '无效或已过期的任务'}), 404
+        return jsonify({
+            'status': job['status'],
+            'phase': job.get('phase', ''),
+            'percent': job.get('percent', 0),
+            'error': job.get('error'),
+        })
+
+
+@app.route('/api/csv/result', methods=['GET'])
+def csv_result():
+    job_id = request.args.get('job_id')
+    if not job_id:
+        return jsonify({'error': '缺少 job_id'}), 400
+    with _csv_jobs_lock:
+        job = _csv_jobs.get(job_id)
+        if not job:
+            return jsonify({'error': '无效或已过期的任务'}), 404
+        if job['status'] == 'error':
+            err = job.get('error') or '解析失败'
+            del _csv_jobs[job_id]
+            return jsonify({'error': err}), 400
+        if job['status'] != 'done' or job.get('result') is None:
+            return jsonify({'error': '解析尚未完成'}), 400
+        result = job['result']
+        del _csv_jobs[job_id]
+
+    accept = request.headers.get('Accept') or ''
+    want_binary = (
+        request.args.get('format') == 'binary'
+        or 'application/vnd.lwdva.csv-matrix' in accept
+    )
+    if want_binary:
+        try:
+            body = _serialize_csv_result_binary(result)
+        except (ValueError, TypeError) as e:
+            return jsonify({'error': f'二进制序列化失败: {e}'}), 500
+        return Response(
+            body,
+            mimetype='application/vnd.lwdva.csv-matrix',
+            headers={'X-Content-Type-Options': 'nosniff'},
+        )
+
+    # JSON：仅支持纯 rows 列表（流式回退路径）；pandas 大表只含 matrix，避免 tolist 爆内存
+    if result.get('matrix') is not None:
+        return jsonify({'error': '该结果仅支持 format=binary，请在请求中加入查询参数 format=binary'}), 400
+
+    try:
+        body = json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+    except (ValueError, TypeError) as e:
+        return jsonify({'error': f'结果无法序列化为合法 JSON: {e}'}), 500
+    return Response(body, mimetype='application/json; charset=utf-8')
+
 
 def main():
     # 创建命令行参数解析器

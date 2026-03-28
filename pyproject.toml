@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lwdva"
-version = "0.1.2"
+version = "0.1.3"
 description = "数据可视化与分析工具"
 authors = [
     {name = "hexb66"}
@@ -16,6 +16,7 @@ dependencies = [
     "flask>=2.0.0",
     "numpy>=1.20.0",
     "scipy>=1.7.0",
+    "pandas>=1.3.0",
 ]
 
 [project.scripts]

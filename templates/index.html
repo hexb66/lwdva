@@ -491,11 +491,36 @@
             left: 50%;
             transform: translate(-50%, -50%);
             z-index: 1000;
-            padding: 20px;
-            background: rgba(255,255,255,0.9);
+            padding: 20px 28px;
+            min-width: 280px;
+            background: rgba(255,255,255,0.95);
             border-radius: 5px;
             box-shadow: 0 0 10px rgba(0,0,0,0.1);
             text-align: center;
+        }
+        
+        .loading-progress-track {
+            width: 100%;
+            max-width: 260px;
+            height: 10px;
+            background: #e8e8e8;
+            border-radius: 5px;
+            overflow: hidden;
+            margin: 12px auto 6px;
+        }
+        
+        .loading-progress-fill {
+            height: 100%;
+            width: 0%;
+            background: var(--primary-color, #2c7be5);
+            border-radius: 5px;
+            transition: width 0.2s ease-out;
+        }
+        
+        .loading-percent {
+            font-size: 0.8em;
+            color: #666;
+            margin: 0 0 4px;
         }
         
         #notification {
@@ -520,7 +545,7 @@
 </head>
 <body>
     <header>
-        <h1><i class="fas fa-chart-line"></i> 数据可视化与分析工具 v0.1.2</h1>
+        <h1><i class="fas fa-chart-line"></i> 数据可视化与分析工具 v0.1.3</h1>
     </header>
     
     <div class="container">
@@ -724,8 +749,12 @@
     </div>
     
     <div id="loading" class="loading">
-        <i class="fas fa-spinner fa-spin fa-2x"></i>
-        <p>处理中...</p>
+        <i id="loading-spinner" class="fas fa-spinner fa-spin fa-2x"></i>
+        <p id="loading-message">处理中...</p>
+        <div class="loading-progress-track" aria-hidden="true">
+            <div id="loading-progress-fill" class="loading-progress-fill"></div>
+        </div>
+        <p id="loading-percent" class="loading-percent">0%</p>
     </div>
     
     <div id="notification"></div>
